@@ -1146,3 +1146,79 @@ class KAN(nn.Module):
             print()
 
         return y, stats
+    
+    def plot_target_approximation(
+        self,
+        target_fn,
+        x_range,
+        fixed_values=None,
+        resolution: int = 400,
+    ):
+        """
+        Plots model approximation vs target function by varying one input at a time.
+
+        Assumes:
+            input dimension = 2
+            output dimension can be 1 or more
+
+        For each plot:
+            - vary x[0], keep x[1] fixed
+            - vary x[1], keep x[0] fixed
+        """
+
+        if self.in_count != 2:
+            raise ValueError("This plotting function currently assumes in_count=2.")
+
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+
+        xmin, xmax = x_range
+        x_grid = torch.linspace(xmin, xmax, resolution, device=device, dtype=dtype)
+
+        if fixed_values is None:
+            fixed_values = [
+                0.5 * (xmin + xmax),
+                0.5 * (xmin + xmax),
+            ]
+
+        self.eval()
+
+        with torch.no_grad():
+            for varied_idx in range(2):
+                x_plot = torch.zeros(resolution, 2, device=device, dtype=dtype)
+
+                if varied_idx == 0:
+                    x_plot[:, 0] = x_grid
+                    x_plot[:, 1] = fixed_values[1]
+                    title_var = "x1 varied, x2 fixed"
+                else:
+                    x_plot[:, 0] = fixed_values[0]
+                    x_plot[:, 1] = x_grid
+                    title_var = "x2 varied, x1 fixed"
+
+                y_true = target_fn(x_plot)
+                y_pred = self(x_plot)
+
+                y_true_np = y_true.detach().cpu().numpy()
+                y_pred_np = y_pred.detach().cpu().numpy()
+                x_np = x_grid.detach().cpu().numpy()
+
+                out_count = y_true.shape[1]
+
+                fig, axes = plt.subplots(1, out_count, figsize=(6 * out_count, 4))
+
+                if out_count == 1:
+                    axes = [axes]
+
+                for j in range(out_count):
+                    axes[j].plot(x_np, y_true_np[:, j], label=f"target y{j+1}")
+                    axes[j].plot(x_np, y_pred_np[:, j], linestyle="--", label=f"model y{j+1}")
+
+                    axes[j].set_xlabel(f"x[{varied_idx}]")
+                    axes[j].set_ylabel(f"y{j+1}")
+                    axes[j].set_title(f"{title_var} | output y{j+1}")
+                    axes[j].legend()
+                    axes[j].grid(True)
+
+                plt.tight_layout()
+                plt.show()
