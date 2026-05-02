@@ -274,6 +274,10 @@ class PhotonicBasisActivationLayer(nn.Module):
 
     Fixed parameters:
         b_coef[m, :]
+
+    Important:
+        This version does NOT clamp inputs or intermediate values.
+        Therefore, the inputs must already be physically valid.
     """
 
     def __init__(
@@ -283,8 +287,8 @@ class PhotonicBasisActivationLayer(nn.Module):
         b_coef_selected: torch.Tensor,
         x_min: float = 0.0,
         x_max: float = 60.0,
-        clamp_input: bool = True,
-        normalize_basis: bool = True,
+        normalize_basis: bool = False,
+        check_input_range: bool = False,
         debug: bool = False,
     ):
         super().__init__()
@@ -314,8 +318,8 @@ class PhotonicBasisActivationLayer(nn.Module):
 
         self.x_min = float(x_min)
         self.x_max = float(x_max)
-        self.clamp_input = clamp_input
         self.normalize_basis = normalize_basis
+        self.check_input_range = check_input_range
         self.debug = debug
 
         # Fixed photonic activation coefficients.
@@ -337,8 +341,14 @@ class PhotonicBasisActivationLayer(nn.Module):
         Returns:
             basis: shape (batch, 1, in_count, num_basis)
         """
-        if self.clamp_input:
-            x = torch.clamp(x, min=self.x_min, max=self.x_max)
+
+        if self.check_input_range:
+            if torch.any(x < self.x_min) or torch.any(x > self.x_max):
+                raise ValueError(
+                    f"Input outside expected physical range "
+                    f"[{self.x_min}, {self.x_max}]. "
+                    f"Got min={x.min().item()}, max={x.max().item()}."
+                )
 
         b = self.b_coef
 
@@ -351,24 +361,15 @@ class PhotonicBasisActivationLayer(nn.Module):
         b7 = b[:, 6].view(1, 1, 1, -1)
         b8 = b[:, 7].view(1, 1, 1, -1)
 
-        # Numerically safer version of:
-        # b1*log(1 + b2*log(1 + (exp(b3*x)-1)^b4))
+        # Original photonic activation:
+        #
+        # b1 * log(1 + b2 * log(1 + (exp(b3*x) - 1)^b4))
         # + b5*x + b6*x^2 + b7*x^3 + b8*x^4
 
-        exp_arg = torch.clamp(b3 * x, min=-50.0, max=50.0)
-
-        inner_base = torch.exp(exp_arg) - 1.0
-
-        # Since b4 can be non-integer, the base must be nonnegative.
-        inner_base = torch.clamp(inner_base, min=1e-12)
-
+        inner_base = torch.expm1(b3 * x)
         powered = torch.pow(inner_base, b4)
-
         inner_log = torch.log1p(powered)
-
-        # To avoid log of non-positive values if numerical issues appear.
         outer_argument = 1.0 + b2 * inner_log
-        outer_argument = torch.clamp(outer_argument, min=1e-12)
 
         y = (
             b1 * torch.log(outer_argument)
@@ -379,10 +380,8 @@ class PhotonicBasisActivationLayer(nn.Module):
         )
 
         if self.normalize_basis:
-            # Since input_power is in mW and can go up to around 60,
-            # this keeps basis magnitudes more manageable.
             scale = self.x_max - self.x_min
-            y = y / (scale + 1e-12)
+            y = y / scale
 
         return y
 
@@ -430,7 +429,6 @@ class PhotonicBasisActivationLayer(nn.Module):
         }
 
         return y, stats
-
 
 class PhotonicBasisActivationLayerIntervalAffine(nn.Module):
     """
@@ -659,8 +657,9 @@ class KAN(nn.Module):
         layer_type: str = "standard",   # "standard", "affine", or "photonic"
         learn_affine: bool = True,      # only used if layer_type == "affine"
         b_coef_selected: torch.Tensor = None,  # only used if layer_type == "photonic"
-        clamp_input: bool = True,       # only used if layer_type == "photonic"
+        #clamp_input: bool = True,       # only used if layer_type == "photonic"
         normalize_basis: bool = True,   # only used if layer_type == "photonic"
+        check_input_range: bool = False, # only used if layer_type == "photonic"
         basis_min: float = 0.05,
         basis_max: float = 60.0,
         input_abs_max: float = 1.0,
@@ -744,8 +743,8 @@ class KAN(nn.Module):
                     b_coef_selected=b_coef_selected,
                     x_min=x_min,
                     x_max=x_max,
-                    clamp_input=clamp_input,
                     normalize_basis=normalize_basis,
+                    check_input_range=check_input_range,
                     debug=debug,
                 )
 
@@ -858,6 +857,31 @@ class KAN(nn.Module):
         basis = self._compute_basis_on_grid(layer, in_idx, x)   # (R, M)
         contributions = basis * coeffs.unsqueeze(0)
         phi = contributions.sum(dim=1)
+
+        finite_basis = torch.isfinite(basis)
+        finite_phi = torch.isfinite(phi)
+
+        print("basis shape:", basis.shape)
+        print("basis finite:", finite_basis.all().item())
+        print("phi finite:", finite_phi.all().item())
+
+        if not finite_phi.all():
+            bad_idx = torch.where(~finite_phi)[0][0].item()
+            print("First non-finite phi at:")
+            print("  index:", bad_idx)
+            print("  x:", x[bad_idx].item())
+            print("  phi:", phi[bad_idx].item())
+
+        if not finite_basis.all():
+            bad_positions = torch.where(~finite_basis)
+            first_bad_r = bad_positions[0][0].item()
+            first_bad_m = bad_positions[1][0].item()
+
+            print("First non-finite basis at:")
+            print("  x index:", first_bad_r)
+            print("  basis index:", first_bad_m)
+            print("  x:", x[first_bad_r].item())
+            print("  basis value:", basis[first_bad_r, first_bad_m].item())
 
         x_np = x.detach().cpu().numpy()
         phi_np = phi.detach().cpu().numpy()
@@ -1090,4 +1114,35 @@ class KAN(nn.Module):
             outputs.append(h.detach().cpu())
         return outputs
 
-    
+    def inspect_forward_range(self, x):
+        """
+        Runs one forward pass and returns min/max statistics for each layer.
+
+        This does not train the model.
+        It is only a diagnostic check.
+        """
+
+        self.eval()
+
+        with torch.no_grad():
+            y, stats = self.forward(x, track_stats=True)
+
+        print("Final output:")
+        print(f"  shape: {tuple(y.shape)}")
+        print(f"  min:   {y.min().item()}")
+        print(f"  max:   {y.max().item()}")
+        print()
+
+        for layer_stats in stats:
+            layer_idx = layer_stats["layer"]
+
+            print(f"Layer {layer_idx}:")
+            print(f"  input min:  {layer_stats['min_input'].item()}")
+            print(f"  input max:  {layer_stats['max_input'].item()}")
+            print(f"  basis min:  {layer_stats['min_basis'].item()}")
+            print(f"  basis max:  {layer_stats['max_basis'].item()}")
+            print(f"  output min: {layer_stats['min_output'].item()}")
+            print(f"  output max: {layer_stats['max_output'].item()}")
+            print()
+
+        return y, stats
