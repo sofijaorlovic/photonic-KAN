@@ -156,9 +156,17 @@ class TanhBasisActivationLayer(nn.Module):
 
 class TanhBasisActivationLayerAffine(nn.Module):
     """
-    KAN layer with affine input transform inside the basis:
+    KAN layer with fixed affine input transform inside the basis:
+
+        x in [-input_abs_max, input_abs_max]
+        u in [x_min, x_max]
+
         u_i = alpha_i * x_i + beta_i
         s_im(x_i) = 0.5 * (1 + tanh(gamma_i * (u_i - c_im)))
+
+    No clamp.
+    Fixed alpha and beta.
+    Equivalent affine idea to the photonic affine layer.
     """
 
     def __init__(
@@ -166,80 +174,78 @@ class TanhBasisActivationLayerAffine(nn.Module):
         in_count: int,
         out_count: int,
         num_basis: int = 8,
+        input_abs_max: float = 1.0,
         x_min: float = 0.0,
         x_max: float = 1.0,
         gamma_scale: float = 3.0,
-        learn_affine: bool = True,
         debug: bool = False,
     ):
         super().__init__()
 
         if num_basis < 2:
             raise ValueError("num_basis must be at least 2.")
+
+        if input_abs_max <= 0:
+            raise ValueError("input_abs_max must be positive.")
+
         if x_max <= x_min:
             raise ValueError("x_max must be greater than x_min.")
 
         self.in_count = in_count
         self.out_count = out_count
         self.num_basis = num_basis
+        self.input_abs_max = float(input_abs_max)
+        self.x_min = float(x_min)
+        self.x_max = float(x_max)
         self.debug = debug
-        self.learn_affine = learn_affine
 
         centers_1d = torch.linspace(x_min, x_max, num_basis)
-        centers = centers_1d.unsqueeze(0).repeat(in_count, 1)   # (in_count, M)
+        centers = centers_1d.unsqueeze(0).repeat(in_count, 1)
 
         delta = (x_max - x_min) / (num_basis - 1)
         gamma = gamma_scale / delta
-        slopes = torch.full((in_count, num_basis), gamma)       # (in_count, M)
+        slopes = torch.full((in_count, num_basis), gamma)
 
         self.register_buffer("centers", centers)
         self.register_buffer("slopes", slopes)
+
+        alpha_value = (self.x_max - self.x_min) / (2.0 * self.input_abs_max)
+        beta_value = 0.5 * (self.x_min + self.x_max)
+
+        self.register_buffer(
+            "alpha",
+            torch.full((in_count,), alpha_value, dtype=torch.float32),
+        )
+
+        self.register_buffer(
+            "beta",
+            torch.full((in_count,), beta_value, dtype=torch.float32),
+        )
 
         self.coeffs = nn.Parameter(
             0.01 * torch.randn(out_count, in_count, num_basis)
         )
 
-        if learn_affine:
-            # alpha > 0 enforced through softplus
-            self.raw_alpha = nn.Parameter(torch.zeros(in_count))   # softplus(0) ~ 0.693
-            self.beta = nn.Parameter(torch.zeros(in_count))
-        else:
-            self.register_buffer("fixed_alpha", torch.ones(in_count))
-            self.register_buffer("fixed_beta", torch.zeros(in_count))
-
-    def get_alpha(self):
-        if self.learn_affine:
-            return F.softplus(self.raw_alpha) + 1e-6
-        return self.fixed_alpha
-
-    def get_beta(self):
-        if self.learn_affine:
-            return self.beta
-        return self.fixed_beta
-
     def forward(self, x, track_stats: bool = False):
         if x.dim() != 2:
             raise ValueError(f"Expected x shape (batch, in_count), got {tuple(x.shape)}")
+
         if x.size(1) != self.in_count:
             raise ValueError(
                 f"Expected input with {self.in_count} features, got {x.size(1)}"
             )
 
-        alpha = self.get_alpha()                      # (in_count,)
-        beta = self.get_beta()                        # (in_count,)
+        u = self.alpha.unsqueeze(0) * x + self.beta.unsqueeze(0)
 
-        # affine-transformed inputs: u_i = alpha_i x_i + beta_i
-        u = alpha.unsqueeze(0) * x + beta.unsqueeze(0)   # (batch, in_count)
-
-        x_expanded = u.unsqueeze(1).unsqueeze(-1)        # (batch, 1, in_count, 1)
-        centers = self.centers.unsqueeze(0).unsqueeze(0) # (1, 1, in_count, M)
-        slopes = self.slopes.unsqueeze(0).unsqueeze(0)   # (1, 1, in_count, M)
+        x_expanded = u.unsqueeze(1).unsqueeze(-1)
+        centers = self.centers.unsqueeze(0).unsqueeze(0)
+        slopes = self.slopes.unsqueeze(0).unsqueeze(0)
 
         basis = 0.5 * (1.0 + torch.tanh(slopes * (x_expanded - centers)))
-        coeffs = self.coeffs.unsqueeze(0)
 
-        edge_values = (coeffs * basis).sum(dim=-1)   # (batch, out_count, in_count)
-        y = edge_values.sum(dim=-1)                  # (batch, out_count)
+        coeffs = self.coeffs.unsqueeze(0)
+        edge_values = (coeffs * basis).sum(dim=-1)
+        y = edge_values.sum(dim=-1)
 
         if not track_stats:
             return y
@@ -249,9 +255,12 @@ class TanhBasisActivationLayerAffine(nn.Module):
             "max_input": x.max().detach(),
             "min_affine_input": u.min().detach(),
             "max_affine_input": u.max().detach(),
+            "min_basis": basis.min().detach(),
+            "max_basis": basis.max().detach(),
             "min_output": y.min().detach(),
             "max_output": y.max().detach(),
         }
+
         return y, stats
     
 
@@ -430,210 +439,6 @@ class PhotonicBasisActivationLayer(nn.Module):
 
         return y, stats
 
-class PhotonicBasisActivationLayerIntervalAffine(nn.Module):
-    """
-    KAN layer using fixed photonic activation functions as basis functions,
-    with a fixed interval-based affine transform before the photonic basis.
-
-    We assume each input feature x_i lies approximately in:
-
-        x_i in [-h, h]
-
-    and map it to a positive photonic interval:
-
-        u_i in [basis_min, basis_max]
-
-    using:
-
-        u_i = alpha * x_i + beta
-
-    where:
-
-        alpha = (basis_max - basis_min) / (2*h)
-        beta  = (basis_min + basis_max) / 2
-
-    Trainable:
-        coeffs[j, i, m]
-
-    Fixed:
-        b_coef[m, :]
-        alpha[i]
-        beta[i]
-    """
-
-    def __init__(
-        self,
-        in_count: int,
-        out_count: int,
-        b_coef_selected: torch.Tensor,
-        input_abs_max: float,
-        basis_min: float = 0.05,
-        basis_max: float = 60.0,
-        normalize_basis: bool = True,
-        debug: bool = False,
-    ):
-        super().__init__()
-
-        if b_coef_selected is None:
-            raise ValueError("b_coef_selected must be provided.")
-
-        if not torch.is_tensor(b_coef_selected):
-            b_coef_selected = torch.tensor(b_coef_selected, dtype=torch.float32)
-
-        if b_coef_selected.dim() != 2:
-            raise ValueError(
-                f"b_coef_selected must have shape (num_basis, 8), got {tuple(b_coef_selected.shape)}"
-            )
-
-        if b_coef_selected.size(1) != 8:
-            raise ValueError(
-                f"Each photonic basis must have 8 coefficients, got {b_coef_selected.size(1)}."
-            )
-
-        if basis_max <= basis_min:
-            raise ValueError("basis_max must be greater than basis_min.")
-
-        if input_abs_max <= 0:
-            raise ValueError("input_abs_max must be positive.")
-
-        self.in_count = in_count
-        self.out_count = out_count
-        self.num_basis = b_coef_selected.size(0)
-
-        self.input_abs_max = float(input_abs_max)
-        self.basis_min = float(basis_min)
-        self.basis_max = float(basis_max)
-        self.normalize_basis = normalize_basis
-        self.debug = debug
-
-        # Fixed photonic activation coefficients.
-        # Not trainable.
-        self.register_buffer("b_coef", b_coef_selected.clone().float())
-
-        # Fixed interval affine transform.
-        alpha_value = (self.basis_max - self.basis_min) / (2.0 * self.input_abs_max)
-        beta_value = (self.basis_min + self.basis_max) / 2.0
-
-        alpha = torch.full((in_count,), alpha_value, dtype=torch.float32)
-        beta = torch.full((in_count,), beta_value, dtype=torch.float32)
-
-        self.register_buffer("alpha", alpha)
-        self.register_buffer("beta", beta)
-
-        # Trainable KAN combination coefficients.
-        self.coeffs = nn.Parameter(
-            0.01 * torch.randn(out_count, in_count, self.num_basis)
-        )
-
-    def _photonic_basis_from_u(self, u: torch.Tensor):
-        """
-        Computes selected photonic basis functions.
-
-        Args:
-            u: shape (batch, 1, in_count, 1)
-
-        Returns:
-            basis: shape (batch, 1, in_count, num_basis)
-        """
-        b = self.b_coef
-
-        b1 = b[:, 0].view(1, 1, 1, -1)
-        b2 = b[:, 1].view(1, 1, 1, -1)
-        b3 = b[:, 2].view(1, 1, 1, -1)
-        b4 = b[:, 3].view(1, 1, 1, -1)
-        b5 = b[:, 4].view(1, 1, 1, -1)
-        b6 = b[:, 5].view(1, 1, 1, -1)
-        b7 = b[:, 6].view(1, 1, 1, -1)
-        b8 = b[:, 7].view(1, 1, 1, -1)
-
-        # Numerical safety for exp.
-        exp_arg = torch.clamp(b3 * u, min=-50.0, max=50.0)
-
-        inner_base = torch.exp(exp_arg) - 1.0
-
-        # u should be positive by construction, but this protects against
-        # tiny numerical issues.
-        inner_base = torch.clamp(inner_base, min=1e-12)
-
-        powered = torch.pow(inner_base, b4)
-
-        inner_log = torch.log1p(powered)
-
-        outer_argument = 1.0 + b2 * inner_log
-
-        # Protect log argument.
-        outer_argument = torch.clamp(outer_argument, min=1e-12)
-
-        y = (
-            b1 * torch.log(outer_argument)
-            + b5 * u
-            + b6 * u**2
-            + b7 * u**3
-            + b8 * u**4
-        )
-
-        if self.normalize_basis:
-            y = y / (self.basis_max - self.basis_min + 1e-12)
-
-        return y
-
-    def forward(self, x, track_stats: bool = False):
-        if x.dim() != 2:
-            raise ValueError(f"Expected x shape (batch, in_count), got {tuple(x.shape)}")
-
-        if x.size(1) != self.in_count:
-            raise ValueError(
-                f"Expected input with {self.in_count} features, got {x.size(1)}"
-            )
-
-        # Fixed interval affine transform:
-        # x in [-input_abs_max, input_abs_max]
-        # maps to u in [basis_min, basis_max]
-        u = self.alpha.unsqueeze(0) * x + self.beta.unsqueeze(0)
-        # shape: (batch, in_count)
-
-        u_expanded = u.unsqueeze(1).unsqueeze(-1)
-        # shape: (batch, 1, in_count, 1)
-
-        basis = self._photonic_basis_from_u(u_expanded)
-        # shape: (batch, 1, in_count, num_basis)
-
-        coeffs = self.coeffs.unsqueeze(0)
-        # shape: (1, out_count, in_count, num_basis)
-
-        edge_values = (coeffs * basis).sum(dim=-1)
-        # shape: (batch, out_count, in_count)
-
-        y = edge_values.sum(dim=-1)
-        # shape: (batch, out_count)
-
-        if self.debug:
-            print(f"[PhotonicBasisActivationLayerIntervalAffine] x: {x.shape}")
-            print(f"[PhotonicBasisActivationLayerIntervalAffine] u: {u.shape}")
-            print(f"[PhotonicBasisActivationLayerIntervalAffine] basis: {basis.shape}")
-            print(f"[PhotonicBasisActivationLayerIntervalAffine] coeffs: {coeffs.shape}")
-            print(f"[PhotonicBasisActivationLayerIntervalAffine] y: {y.shape}")
-
-        if not track_stats:
-            return y
-
-        stats = {
-            "min_input": x.min().detach(),
-            "max_input": x.max().detach(),
-            "min_affine_input": u.min().detach(),
-            "max_affine_input": u.max().detach(),
-            "min_basis": basis.min().detach(),
-            "max_basis": basis.max().detach(),
-            "min_output": y.min().detach(),
-            "max_output": y.max().detach(),
-            "alpha_min": self.alpha.min().detach(),
-            "alpha_max": self.alpha.max().detach(),
-            "beta_min": self.beta.min().detach(),
-            "beta_max": self.beta.max().detach(),
-        }
-
-        return y, stats
-
 
 class PhotonicBasisActivationLayerIntervalAffineClean(nn.Module):
     """
@@ -786,7 +591,6 @@ class KAN(nn.Module):
         dropout_prob: float = 0.0,
         debug: bool = False,
         layer_type: str = "standard",   # "standard", "affine", or "photonic"
-        learn_affine: bool = True,      # only used if layer_type == "affine"
         b_coef_selected: torch.Tensor = None,  # only used if layer_type == "photonic"
         #clamp_input: bool = True,       # only used if layer_type == "photonic"
         normalize_basis: bool = True,   # only used if layer_type == "photonic"
@@ -811,7 +615,6 @@ class KAN(nn.Module):
         self.gamma_scale = gamma_scale
         self.debug = debug
         self.layer_type = layer_type
-        self.learn_affine = learn_affine
         self.basis_min = basis_min
         self.basis_max = basis_max
         self.input_abs_max = input_abs_max
@@ -834,7 +637,7 @@ class KAN(nn.Module):
         else:
             raise ValueError("layer_type must be 'standard', 'affine', or 'photonic'.")
 
-        if layer_type in ["photonic", "photonic_interval_affine"]:
+        if layer_type in ["photonic", "photonic_interval_affine_clean"]:
             if b_coef_selected is None:
                 raise ValueError(f"b_coef_selected must be provided when layer_type='{layer_type}'.")
 
@@ -866,10 +669,10 @@ class KAN(nn.Module):
                     in_count=layer_sizes[i],
                     out_count=layer_sizes[i + 1],
                     num_basis=num_basis,
+                    input_abs_max=input_abs_max,
                     x_min=x_min,
                     x_max=x_max,
                     gamma_scale=gamma_scale,
-                    learn_affine=learn_affine,
                     debug=debug,
                 )
 
@@ -900,18 +703,23 @@ class KAN(nn.Module):
 
         self.layers = nn.ModuleList(layers)
         self.dropout = nn.Dropout(dropout_prob) if dropout_prob > 0 else None
-
+    
     def _validate_layer(self, layer_idx: int):
         layer = self.layers[layer_idx]
 
-        if not isinstance(
-            layer,
-            (TanhBasisActivationLayer, 
-            TanhBasisActivationLayerAffine, 
-            PhotonicBasisActivationLayer, 
-            PhotonicBasisActivationLayerIntervalAffineClean),
-        ):
-            raise TypeError("Selected layer is not a supported KAN layer.")
+        supported_layers = (
+            TanhBasisActivationLayer,
+            TanhBasisActivationLayerAffine,
+            PhotonicBasisActivationLayer,
+            PhotonicBasisActivationLayerIntervalAffineClean,
+        )
+
+        if not isinstance(layer, supported_layers):
+            raise TypeError(
+                f"Selected layer is not a supported KAN layer. "
+                f"Got layer type: {type(layer).__name__}"
+            )
+
         return layer
 
     def _compute_basis_on_grid(self, layer, in_idx: int, x: torch.Tensor):
@@ -938,8 +746,8 @@ class KAN(nn.Module):
         slopes = layer.slopes[in_idx]
 
         if isinstance(layer, TanhBasisActivationLayerAffine):
-            alpha = layer.get_alpha()[in_idx]
-            beta = layer.get_beta()[in_idx]
+            alpha = layer.alpha[in_idx]
+            beta = layer.beta[in_idx]
             x_eff = alpha * x + beta
         else:
             x_eff = x
@@ -1125,8 +933,8 @@ class KAN(nn.Module):
 
         if isinstance(layer, TanhBasisActivationLayerAffine):
             centers = layer.centers[in_idx]
-            alpha = layer.get_alpha()[in_idx].detach().cpu().item()
-            beta = layer.get_beta()[in_idx].detach().cpu().item()
+            alpha = layer.alpha[in_idx].detach().cpu().item()
+            beta = layer.beta[in_idx].detach().cpu().item()
 
             transformed_centers = (centers.detach().cpu().numpy() - beta) / alpha
 
