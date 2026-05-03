@@ -635,6 +635,137 @@ class PhotonicBasisActivationLayerIntervalAffine(nn.Module):
         return y, stats
 
 
+class PhotonicBasisActivationLayerIntervalAffineClean(nn.Module):
+    """
+    Photonic KAN layer with fixed affine input mapping:
+
+        x in [-input_abs_max, input_abs_max]
+        u in [basis_min, basis_max]
+
+        u = alpha * x + beta
+
+    No clamp.
+    No basis normalization.
+    """
+
+    def __init__(
+        self,
+        in_count: int,
+        out_count: int,
+        b_coef_selected: torch.Tensor,
+        input_abs_max: float,
+        basis_min: float = 0.05,
+        basis_max: float = 60.0,
+        debug: bool = False,
+    ):
+        super().__init__()
+
+        if b_coef_selected is None:
+            raise ValueError("b_coef_selected must be provided.")
+
+        if not torch.is_tensor(b_coef_selected):
+            b_coef_selected = torch.tensor(b_coef_selected, dtype=torch.float32)
+
+        if b_coef_selected.dim() != 2 or b_coef_selected.size(1) != 8:
+            raise ValueError(
+                f"b_coef_selected must have shape (num_basis, 8), got {tuple(b_coef_selected.shape)}"
+            )
+
+        if input_abs_max <= 0:
+            raise ValueError("input_abs_max must be positive.")
+
+        if basis_max <= basis_min:
+            raise ValueError("basis_max must be greater than basis_min.")
+
+        self.in_count = in_count
+        self.out_count = out_count
+        self.num_basis = b_coef_selected.size(0)
+
+        self.input_abs_max = float(input_abs_max)
+        self.basis_min = float(basis_min)
+        self.basis_max = float(basis_max)
+        self.debug = debug
+
+        self.register_buffer("b_coef", b_coef_selected.clone().float())
+
+        alpha_value = (self.basis_max - self.basis_min) / (2.0 * self.input_abs_max)
+        beta_value = 0.5 * (self.basis_min + self.basis_max)
+
+        self.register_buffer(
+            "alpha",
+            torch.full((in_count,), alpha_value, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "beta",
+            torch.full((in_count,), beta_value, dtype=torch.float32),
+        )
+
+        self.coeffs = nn.Parameter(
+            0.01 * torch.randn(out_count, in_count, self.num_basis)
+        )
+
+    def _photonic_basis_from_u(self, u: torch.Tensor):
+        b = self.b_coef
+
+        b1 = b[:, 0].view(1, 1, 1, -1)
+        b2 = b[:, 1].view(1, 1, 1, -1)
+        b3 = b[:, 2].view(1, 1, 1, -1)
+        b4 = b[:, 3].view(1, 1, 1, -1)
+        b5 = b[:, 4].view(1, 1, 1, -1)
+        b6 = b[:, 5].view(1, 1, 1, -1)
+        b7 = b[:, 6].view(1, 1, 1, -1)
+        b8 = b[:, 7].view(1, 1, 1, -1)
+
+        inner_base = torch.expm1(b3 * u)
+        powered = torch.pow(inner_base, b4)
+        inner_log = torch.log1p(powered)
+        outer_argument = 1.0 + b2 * inner_log
+
+        y = (
+            b1 * torch.log(outer_argument)
+            + b5 * u
+            + b6 * u**2
+            + b7 * u**3
+            + b8 * u**4
+        )
+
+        return y
+
+    def forward(self, x, track_stats: bool = False):
+        if x.dim() != 2:
+            raise ValueError(f"Expected x shape (batch, in_count), got {tuple(x.shape)}")
+
+        if x.size(1) != self.in_count:
+            raise ValueError(
+                f"Expected input with {self.in_count} features, got {x.size(1)}"
+            )
+
+        u = self.alpha.unsqueeze(0) * x + self.beta.unsqueeze(0)
+
+        u_expanded = u.unsqueeze(1).unsqueeze(-1)
+        basis = self._photonic_basis_from_u(u_expanded)
+
+        coeffs = self.coeffs.unsqueeze(0)
+        edge_values = (coeffs * basis).sum(dim=-1)
+
+        y = edge_values.sum(dim=-1)
+
+        if not track_stats:
+            return y
+
+        stats = {
+            "min_input": x.min().detach(),
+            "max_input": x.max().detach(),
+            "min_affine_input": u.min().detach(),
+            "max_affine_input": u.max().detach(),
+            "min_basis": basis.min().detach(),
+            "max_basis": basis.max().detach(),
+            "min_output": y.min().detach(),
+            "max_output": y.max().detach(),
+        }
+
+        return y, stats
+
 class KAN(nn.Module):
     """
     Multi-layer KAN using either:
@@ -662,7 +793,9 @@ class KAN(nn.Module):
         check_input_range: bool = False, # only used if layer_type == "photonic"
         basis_min: float = 0.05,
         basis_max: float = 60.0,
-        input_abs_max: float = 1.0,
+        input_abs_max: float = 10.0,    # only used for photonic layers with interval affine
+        input_min_by_layer=None,
+        input_max_by_layer=None,
     ):
         super().__init__()
 
@@ -682,6 +815,8 @@ class KAN(nn.Module):
         self.basis_min = basis_min
         self.basis_max = basis_max
         self.input_abs_max = input_abs_max
+        self.input_min_by_layer = input_min_by_layer
+        self.input_max_by_layer = input_max_by_layer
 
         layer_sizes = [in_count] + self.hidden_layer_sizes + [out_count]
 
@@ -693,6 +828,8 @@ class KAN(nn.Module):
             layer_cls = PhotonicBasisActivationLayer
         elif layer_type == "photonic_interval_affine":
             layer_cls = PhotonicBasisActivationLayerIntervalAffine
+        elif layer_type == "photonic_interval_affine_clean":
+            layer_cls = PhotonicBasisActivationLayerIntervalAffineClean
 
         else:
             raise ValueError("layer_type must be 'standard', 'affine', or 'photonic'.")
@@ -748,7 +885,7 @@ class KAN(nn.Module):
                     debug=debug,
                 )
 
-            elif layer_type == "photonic_interval_affine":
+            elif layer_type == "photonic_interval_affine_clean":
                 layer = layer_cls(
                     in_count=layer_sizes[i],
                     out_count=layer_sizes[i + 1],
@@ -756,10 +893,9 @@ class KAN(nn.Module):
                     input_abs_max=input_abs_max,
                     basis_min=basis_min,
                     basis_max=basis_max,
-                    normalize_basis=normalize_basis,
                     debug=debug,
                 )
-
+            
             layers.append(layer)
 
         self.layers = nn.ModuleList(layers)
@@ -770,7 +906,10 @@ class KAN(nn.Module):
 
         if not isinstance(
             layer,
-            (TanhBasisActivationLayer, TanhBasisActivationLayerAffine, PhotonicBasisActivationLayer),
+            (TanhBasisActivationLayer, 
+            TanhBasisActivationLayerAffine, 
+            PhotonicBasisActivationLayer, 
+            PhotonicBasisActivationLayerIntervalAffineClean),
         ):
             raise TypeError("Selected layer is not a supported KAN layer.")
         return layer
@@ -783,6 +922,15 @@ class KAN(nn.Module):
         if isinstance(layer, PhotonicBasisActivationLayer):
             x_expanded = x.view(-1, 1, 1, 1)
             basis = layer._photonic_basis(x_expanded)
+            basis = basis[:, 0, 0, :]
+            return basis
+        
+        if isinstance(layer, PhotonicBasisActivationLayerIntervalAffineClean):
+            alpha = layer.alpha[in_idx]
+            beta = layer.beta[in_idx]
+            x_eff = alpha * x + beta
+            x_expanded = x_eff.view(-1, 1, 1, 1)
+            basis = layer._photonic_basis_from_u(x_expanded)
             basis = basis[:, 0, 0, :]
             return basis
 
@@ -897,7 +1045,7 @@ class KAN(nn.Module):
         plt.xlabel(f"Input feature x[{in_idx}]")
         plt.ylabel("Edge response")
         plt.title(f"Layer {layer_idx}: edge function from input {in_idx} to output {out_idx}")
-        plt.legend()
+        #plt.legend()
         plt.grid(True)
         plt.tight_layout()
         plt.show()
@@ -996,6 +1144,9 @@ class KAN(nn.Module):
 
         elif isinstance(layer, PhotonicBasisActivationLayer):
             title_suffix = " (photonic bases)"
+
+        elif isinstance(layer, PhotonicBasisActivationLayerIntervalAffineClean):
+            title_suffix = " (photonic interval affine bases)"
 
         plt.xlabel(f"Input feature x[{in_idx}]")
         plt.ylabel("Basis value")
@@ -1211,8 +1362,8 @@ class KAN(nn.Module):
                     axes = [axes]
 
                 for j in range(out_count):
-                    axes[j].plot(x_np, y_true_np[:, j], label=f"target y{j+1}")
-                    axes[j].plot(x_np, y_pred_np[:, j], linestyle="--", label=f"model y{j+1}")
+                    axes[j].plot(x_np, y_pred_np[:, j], label=f"model y{j+1}")
+                    axes[j].plot(x_np, y_true_np[:, j], linestyle="--", label=f"target y{j+1}")
 
                     axes[j].set_xlabel(f"x[{varied_idx}]")
                     axes[j].set_ylabel(f"y{j+1}")
@@ -1222,3 +1373,52 @@ class KAN(nn.Module):
 
                 plt.tight_layout()
                 plt.show()
+
+    def calibrate_input_ranges_by_layer(
+        self,
+        x: torch.Tensor,
+        first_layer_input_min: float,
+        first_layer_input_max: float,
+        margin: float = 1.10,
+        min_width: float = 1e-6,
+        verbose: bool = True,
+    ):
+        """
+        Calibrates interval-affine photonic layers using full observed input ranges.
+
+        Layer 0 is fixed to the known original input range:
+            [first_layer_input_min, first_layer_input_max]
+
+        Later layers are calibrated from the observed output range of the previous layer.
+        """
+
+        self.eval()
+
+        with torch.no_grad():
+            h = x
+
+            for layer_idx, layer in enumerate(self.layers):
+                if isinstance(layer, PhotonicBasisActivationLayerIntervalAffineClean):
+                    if layer_idx == 0:
+                        input_min = float(first_layer_input_min)
+                        input_max = float(first_layer_input_max)
+                        layer_margin = 1.0
+                    else:
+                        input_min = h.min().item()
+                        input_max = h.max().item()
+                        layer_margin = margin
+
+                    layer.set_input_range(
+                        input_min=input_min,
+                        input_max=input_max,
+                        margin=layer_margin,
+                        min_width=min_width,
+                    )
+
+                    if verbose:
+                        print(
+                            f"Layer {layer_idx}: calibrated input range "
+                            f"[{layer.input_min:.6g}, {layer.input_max:.6g}]"
+                        )
+
+                h = layer(h)
