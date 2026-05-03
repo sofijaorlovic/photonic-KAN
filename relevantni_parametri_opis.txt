@@ -1,0 +1,189 @@
+Opis sadržaja fajla photonic_kan_final_test_run.mat
+
+x_test
+Matrica test ulaza dimenzije 800 x 2. Prva kolona je ulazna promenljiva x1, druga kolona je ulazna promenljiva x2.
+
+y_test
+Vektor tačnih ciljnih vrednosti dimenzije 800 x 1. Vrednosti su izračunate pomoću funkcije:
+y = exp(sin(pi*x1) + x2^2).
+
+y_pred_test
+Vektor predikcija modela dimenzije 800 x 1.
+
+final_test_mse
+Srednja kvadratna greška modela na test skupu, izračunata kao srednja vrednost kvadrata razlike y_pred_test i y_test.
+
+in_count
+Broj ulaznih promenljivih modela. U ovom eksperimentu je in_count = 2.
+
+out_count
+Broj izlaznih promenljivih modela. U ovom eksperimentu je out_count = 1.
+
+hidden_layer_sizes
+Veličina skrivenog sloja. 
+
+num_layers
+Broj KAN slojeva u modelu.
+sloj 0: 2 ulaza -> 1 skriveni neuron,
+sloj 1: 1 skriveni neuron -> 1 izlaz.
+
+basis_min
+Donja granica intervala u koji se afino mapira ulaz pre računanja fotonskih baznih funkcija. U ovom eksperimentu je basis_min = 0.05.
+
+basis_max
+Gornja granica intervala u koji se afino mapira ulaz pre računanja fotonskih baznih funkcija. U ovom eksperimentu je basis_max = 2.0.
+
+input_abs_max
+Vrednost koja definiše simetrični ulazni opseg [-input_abs_max, input_abs_max] koji se afino mapira u interval [basis_min, basis_max]. U ovom eksperimentu je input_abs_max = 1.
+
+selected_indices_python
+Indeksi izabranih fotonskih baznih funkcija u Python indeksiranju, gde indeksiranje počinje od 0. U ovom eksperimentu su izabrani indeksi 7, 8, 9, 10, 11, 12, 13 i 14.
+
+selected_indices_matlab
+Isti izabrani indeksi, ali prilagođeni MATLAB indeksiranju, gde indeksiranje počinje od 1. U ovom eksperimentu su MATLAB indeksi 8, 9, 10, 11, 12, 13, 14 i 15.
+
+selected_detunings
+Vrednosti detuninga koje odgovaraju izabranim fotonskim baznim funkcijama.
+
+input_power
+Originalni vektor ulaznih snaga iz eksperimentalnog fotonskog fajla.
+
+peakout_data
+Originalni eksperimentalni izlazni podaci za fotonske bazne funkcije.
+
+set_detuning
+Originalni skup svih vrednosti detuninga iz eksperimentalnog fajla.
+
+PROMENLJIVE ZA SLOJ 0:
+
+layer0_num_basis
+Broj fotonskih baznih funkcija u sloju 0. U ovom eksperimentu je layer0_num_basis = 8.
+
+layer0_b_coef
+Matrica koeficijenata fotonskih baznih funkcija za sloj 0, dimenzije 8 x 8. Svaki red odgovara jednoj izabranoj baznoj funkciji, a osam kolona odgovara parametrima b1, b2, ..., b8 u analitičkoj formuli fotonske baze.
+
+layer0_alpha
+Vektor alfa koeficijenata za afinu transformaciju ulaza u sloju 0. Dimenzija je 1 x 2, jer sloj 0 ima dva ulaza. Koristi se u izrazu:
+u = alpha(i) * x + beta(i).
+
+layer0_beta
+Vektor beta koeficijenata za afinu transformaciju ulaza u sloju 0. Dimenzija je 1 x 2, jer sloj 0 ima dva ulaza.
+
+layer0_coeffs
+Naučeni KAN koeficijenti za sloj 0. Dimenzija je 1 x 2 x 8, odnosno:
+broj izlaznih neurona x broj ulaznih neurona x broj baznih funkcija.
+Element layer0_coeffs(o,i,m) množi m-tu baznu funkciju na vezi od ulaza i ka izlazu o.
+
+layer0_input
+Ulaz u sloj 0. Ovo je isto što i x_test, dimenzije 800 x 2.
+
+layer0_affine_u
+Afino transformisani ulaz u sloj 0, dimenzije 800 x 2. Računa se kao:
+u(n,i) = layer0_alpha(i) * layer0_input(n,i) + layer0_beta(i).
+
+layer0_basis
+Vrednosti svih fotonskih baznih funkcija u sloju 0 za sve test primere. Dimenzija je 800 x 1 x 2 x 8, odnosno:
+broj test primera x broj izlaznih neurona x broj ulaznih neurona x broj baznih funkcija.
+
+layer0_edge_values
+Vrednosti pojedinačnih ivica u sloju 0 nakon množenja baznih funkcija naučenim koeficijentima i sabiranja po bazama. Dimenzija je 800 x 1 x 2. Element layer0_edge_values(n,o,i) predstavlja doprinos ulaza i izlaznom neuronu o za test primer n.
+
+layer0_output
+Izlaz sloja 0, dimenzije 800 x 1. Dobija se sabiranjem svih ulaznih ivica za svaki izlazni neuron:
+layer0_output(n,o) = sum_i layer0_edge_values(n,o,i).
+Ovo je ujedno ulaz u sloj 1.
+
+layer0_min_input
+Minimalna vrednost ulaza u sloj 0.
+
+layer0_max_input
+Maksimalna vrednost ulaza u sloj 0.
+
+layer0_min_affine_u
+Minimalna vrednost afino transformisanog ulaza u sloju 0.
+
+layer0_max_affine_u
+Maksimalna vrednost afino transformisanog ulaza u sloju 0.
+
+layer0_min_basis
+Minimalna vrednost fotonskih baznih funkcija u sloju 0.
+
+layer0_max_basis
+Maksimalna vrednost fotonskih baznih funkcija u sloju 0.
+
+layer0_min_edge_values
+Minimalna vrednost doprinosa pojedinačnih ivica u sloju 0.
+
+layer0_max_edge_values
+Maksimalna vrednost doprinosa pojedinačnih ivica u sloju 0.
+
+layer0_min_output
+Minimalna vrednost izlaza sloja 0.
+
+layer0_max_output
+Maksimalna vrednost izlaza sloja 0.
+
+PROMENLJIVE ZA SLOJ 1:
+
+layer1_num_basis
+Broj fotonskih baznih funkcija u sloju 1. U ovom eksperimentu je layer1_num_basis = 8.
+
+layer1_b_coef
+Matrica koeficijenata fotonskih baznih funkcija za sloj 1, dimenzije 8 x 8. Kao i kod sloja 0, svaki red odgovara jednoj baznoj funkciji, a kolone su parametri b1, b2, ..., b8.
+
+layer1_alpha
+Vektor alfa koeficijenata za afinu transformaciju ulaza u sloju 1. Dimenzija je 1 x 1, jer sloj 1 ima jedan ulaz.
+
+layer1_beta
+Vektor beta koeficijenata za afinu transformaciju ulaza u sloju 1. Dimenzija je 1 x 1.
+
+layer1_coeffs
+Naučeni KAN koeficijenti za sloj 1. Dimenzija je 1 x 1 x 8, odnosno:
+broj izlaznih neurona x broj ulaznih neurona x broj baznih funkcija.
+
+layer1_input
+Ulaz u sloj 1, dimenzije 800 x 1. Ovo je isto što i layer0_output.
+
+layer1_affine_u
+Afino transformisani ulaz u sloj 1, dimenzije 800 x 1. Računa se kao:
+u(n,i) = layer1_alpha(i) * layer1_input(n,i) + layer1_beta(i).
+
+layer1_basis
+Vrednosti svih fotonskih baznih funkcija u sloju 1 za sve test primere. Dimenzija je 800 x 1 x 1 x 8, odnosno:
+broj test primera x broj izlaznih neurona x broj ulaznih neurona x broj baznih funkcija.
+
+layer1_edge_values
+Vrednosti pojedinačnih ivica u sloju 1 nakon množenja baznih funkcija naučenim koeficijentima i sabiranja po bazama. Dimenzija je 800 x 1 x 1.
+
+layer1_output
+Izlaz sloja 1, dimenzije 800 x 1. Ovo je konačna predikcija modela i treba da bude jednako y_pred_test, do numeričke preciznosti.
+
+layer1_min_input
+Minimalna vrednost ulaza u sloj 1.
+
+layer1_max_input
+Maksimalna vrednost ulaza u sloj 1.
+
+layer1_min_affine_u
+Minimalna vrednost afino transformisanog ulaza u sloju 1.
+
+layer1_max_affine_u
+Maksimalna vrednost afino transformisanog ulaza u sloju 1.
+
+layer1_min_basis
+Minimalna vrednost fotonskih baznih funkcija u sloju 1.
+
+layer1_max_basis
+Maksimalna vrednost fotonskih baznih funkcija u sloju 1.
+
+layer1_min_edge_values
+Minimalna vrednost doprinosa pojedinačnih ivica u sloju 1.
+
+layer1_max_edge_values
+Maksimalna vrednost doprinosa pojedinačnih ivica u sloju 1.
+
+layer1_min_output
+Minimalna vrednost izlaza sloja 1.
+
+layer1_max_output
+Maksimalna vrednost izlaza sloja 1.
