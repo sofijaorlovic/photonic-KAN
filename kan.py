@@ -4,6 +4,53 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.io
+from scipy.io import savemat
+from pathlib import Path
+
+
+def _to_matlab_safe(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy()
+
+    if isinstance(value, np.ndarray):
+        return value
+
+    if isinstance(value, (float, int, bool, str)):
+        return value
+
+    if isinstance(value, list):
+        return np.array(value, dtype=object)
+
+    if isinstance(value, tuple):
+        return np.array(value, dtype=object)
+
+    if isinstance(value, dict):
+        return {str(k): _to_matlab_safe(v) for k, v in value.items()}
+
+    return value
+
+
+def export_plot_data_to_mat(path: str, data: dict, export_dir: str = None):
+    """
+    Saves plot data to a .mat file.
+
+    If export_dir is provided, the file is saved inside that folder.
+    The folder is created automatically if it does not exist.
+    """
+    if path is None:
+        return
+
+    if export_dir is not None:
+        export_dir = Path(export_dir)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        path = export_dir / path
+    else:
+        path = Path(path)
+
+    matlab_data = {str(k): _to_matlab_safe(v) for k, v in data.items()}
+    savemat(str(path), matlab_data)
+
+    print(f"Saved MATLAB plot data to: {path}")
 
 
 def load_photonic_activation_data(mat_path: str):
@@ -785,7 +832,7 @@ class KAN(nn.Module):
         if return_all:
             return x, activations
         return x
-    
+        
     def plot_edge_function(
         self,
         layer_idx: int,
@@ -794,6 +841,8 @@ class KAN(nn.Module):
         x_range=None,
         resolution: int = 400,
         show_basis: bool = False,
+        mat_export_path: str = None,
+        mat_export_dir: str = None,
     ):
         layer = self._validate_layer(layer_idx)
 
@@ -841,6 +890,25 @@ class KAN(nn.Module):
 
         x_np = x.detach().cpu().numpy()
         phi_np = phi.detach().cpu().numpy()
+
+        export_plot_data_to_mat(
+            mat_export_path,
+            {
+                "plot_type": "edge_function",
+                "layer_idx": layer_idx,
+                "out_idx": out_idx,
+                "in_idx": in_idx,
+                "x_range": np.array([xmin, xmax]),
+                "resolution": resolution,
+                "x": x,
+                "basis": basis,
+                "coeffs": coeffs,
+                "contributions": contributions,
+                "phi": phi,
+                "show_basis": show_basis,
+            },
+            export_dir=mat_export_dir,
+        )
 
         plt.figure(figsize=(8, 5))
         plt.plot(x_np, phi_np, label=f"$\\phi_{{{in_idx},{out_idx}}}(x)$")
@@ -907,6 +975,8 @@ class KAN(nn.Module):
         in_idx: int,
         x_range=None,
         resolution: int = 400,
+        mat_export_path: str = None,
+        mat_export_dir: str = None,
     ):
         layer = self._validate_layer(layer_idx)
 
@@ -920,6 +990,37 @@ class KAN(nn.Module):
 
         x = torch.linspace(xmin, xmax, resolution)
         basis = self._compute_basis_on_grid(layer, in_idx, x)
+
+        export_data = {
+            "plot_type": "basis_functions",
+            "layer_idx": layer_idx,
+            "in_idx": in_idx,
+            "x_range": np.array([xmin, xmax]),
+            "resolution": resolution,
+            "x": x,
+            "basis": basis,
+        }
+
+        if hasattr(layer, "centers"):
+            export_data["centers"] = layer.centers[in_idx]
+
+        if hasattr(layer, "slopes"):
+            export_data["slopes"] = layer.slopes[in_idx]
+
+        if hasattr(layer, "alpha"):
+            export_data["alpha"] = layer.alpha[in_idx]
+
+        if hasattr(layer, "beta"):
+            export_data["beta"] = layer.beta[in_idx]
+
+        if hasattr(layer, "b_coef"):
+            export_data["b_coef"] = layer.b_coef
+
+        export_plot_data_to_mat(
+            mat_export_path,
+            export_data,
+            export_dir=mat_export_dir,
+        )
 
         x_np = x.detach().cpu().numpy()
         basis_np = basis.detach().cpu().numpy()
@@ -1016,6 +1117,8 @@ class KAN(nn.Module):
         layer_idx: int,
         out_idx: int,
         in_idx: int,
+        mat_export_path: str = None,
+        mat_export_dir: str = None,
     ):
         layer = self._validate_layer(layer_idx)
 
@@ -1025,6 +1128,19 @@ class KAN(nn.Module):
             raise ValueError(f"in_idx must be in [0, {layer.in_count - 1}]")
 
         coeffs = layer.coeffs[out_idx, in_idx].detach().cpu().numpy()
+        
+        export_plot_data_to_mat(
+            mat_export_path,
+            {
+                "plot_type": "coefficient_vector",
+                "layer_idx": layer_idx,
+                "out_idx": out_idx,
+                "in_idx": in_idx,
+                "basis_index": np.arange(layer.num_basis),
+                "coeffs": coeffs,
+            },
+            export_dir=mat_export_dir,
+        )
 
         plt.figure(figsize=(7, 4))
         plt.plot(range(layer.num_basis), coeffs, marker="o")
@@ -1112,6 +1228,8 @@ class KAN(nn.Module):
         x_range,
         fixed_values=None,
         resolution: int = 400,
+        mat_export_prefix: str = None,
+        mat_export_dir: str = None,
     ):
         """
         Plots model approximation vs target function by varying one input at a time.
@@ -1157,6 +1275,23 @@ class KAN(nn.Module):
 
                 y_true = target_fn(x_plot)
                 y_pred = self(x_plot)
+
+                if mat_export_prefix is not None:
+                    export_plot_data_to_mat(
+                        f"{mat_export_prefix}_varied_x{varied_idx}.mat",
+                        {
+                            "plot_type": "target_approximation",
+                            "varied_idx": varied_idx,
+                            "x_range": np.array([xmin, xmax]),
+                            "resolution": resolution,
+                            "fixed_values": np.array(fixed_values),
+                            "x_grid": x_grid,
+                            "x_plot": x_plot,
+                            "y_true": y_true,
+                            "y_pred": y_pred,
+                        },
+                    export_dir=mat_export_dir,
+                    )
 
                 y_true_np = y_true.detach().cpu().numpy()
                 y_pred_np = y_pred.detach().cpu().numpy()
