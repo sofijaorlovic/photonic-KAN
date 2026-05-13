@@ -487,6 +487,95 @@ class PhotonicBasisActivationLayer(nn.Module):
         return y, stats
 
 
+class PhotonicBasisActivationLayerPositive(PhotonicBasisActivationLayer):
+    """
+    Photonic KAN layer with strictly positive trainable coefficients.
+
+    Instead of training coeffs directly, this layer trains raw_coeffs and maps them as:
+
+        coeffs = softplus(raw_coeffs) + coeff_eps
+
+    This guarantees coeffs > 0 while keeping optimization unconstrained.
+    """
+
+    def __init__(
+        self,
+        in_count: int,
+        out_count: int,
+        b_coef_selected: torch.Tensor,
+        x_min: float = 0.0,
+        x_max: float = 60.0,
+        normalize_basis: bool = False,
+        check_input_range: bool = False,
+        debug: bool = False,
+        coeff_eps: float = 1e-9,
+    ):
+        super().__init__(
+            in_count=in_count,
+            out_count=out_count,
+            b_coef_selected=b_coef_selected,
+            x_min=x_min,
+            x_max=x_max,
+            normalize_basis=normalize_basis,
+            check_input_range=check_input_range,
+            debug=debug,
+        )
+
+        self.coeff_eps = float(coeff_eps)
+
+        # Remove the unrestricted coeffs created by the parent class.
+        del self.coeffs
+
+        # Train unconstrained raw coefficients.
+        self.raw_coeffs = nn.Parameter(
+            0.01 * torch.randn(out_count, in_count, self.num_basis)
+        )
+
+    def get_coeffs(self):
+        return F.softplus(self.raw_coeffs) + self.coeff_eps
+
+    def forward(self, x, track_stats: bool = False):
+        if x.dim() != 2:
+            raise ValueError(f"Expected x shape (batch, in_count), got {tuple(x.shape)}")
+
+        if x.size(1) != self.in_count:
+            raise ValueError(
+                f"Expected input with {self.in_count} features, got {x.size(1)}"
+            )
+
+        x_expanded = x.unsqueeze(1).unsqueeze(-1)
+
+        basis = self._photonic_basis(x_expanded)
+
+        coeffs = self.get_coeffs().unsqueeze(0)
+
+        edge_values = (coeffs * basis).sum(dim=-1)
+        y = edge_values.sum(dim=-1)
+
+        if self.debug:
+            print(f"[PhotonicBasisActivationLayerPositive] x: {x.shape}")
+            print(f"[PhotonicBasisActivationLayerPositive] basis: {basis.shape}")
+            print(f"[PhotonicBasisActivationLayerPositive] coeffs: {coeffs.shape}")
+            print(f"[PhotonicBasisActivationLayerPositive] edge_values: {edge_values.shape}")
+            print(f"[PhotonicBasisActivationLayerPositive] y: {y.shape}")
+
+        if not track_stats:
+            return y
+
+        stats = {
+            "min_input": x.min().detach(),
+            "max_input": x.max().detach(),
+            "min_basis": basis.min().detach(),
+            "max_basis": basis.max().detach(),
+            "min_coeff": self.get_coeffs().min().detach(),
+            "max_coeff": self.get_coeffs().max().detach(),
+            "min_output": y.min().detach(),
+            "max_output": y.max().detach(),
+        }
+
+        return y, stats
+
+
 class PhotonicBasisActivationLayerIntervalAffineClean(nn.Module):
     """
     Photonic KAN layer with fixed affine input mapping:
@@ -624,6 +713,7 @@ class KAN(nn.Module):
       - TanhBasisActivationLayer
       - TanhBasisActivationLayerAffine
       - PhotonicBasisActivationLayer
+      - PhotonicBasisActivationLayerIntervalAffineClean
     """
 
     def __init__(
@@ -647,6 +737,7 @@ class KAN(nn.Module):
         input_abs_max: float = 10.0,    # only used for photonic layers with interval affine
         input_min_by_layer=None,
         input_max_by_layer=None,
+        coeff_eps: float = 1e-9,
     ):
         super().__init__()
 
@@ -667,6 +758,7 @@ class KAN(nn.Module):
         self.input_abs_max = input_abs_max
         self.input_min_by_layer = input_min_by_layer
         self.input_max_by_layer = input_max_by_layer
+        self.coeff_eps = coeff_eps
 
         layer_sizes = [in_count] + self.hidden_layer_sizes + [out_count]
 
@@ -676,15 +768,15 @@ class KAN(nn.Module):
             layer_cls = TanhBasisActivationLayerAffine
         elif layer_type == "photonic":
             layer_cls = PhotonicBasisActivationLayer
-        elif layer_type == "photonic_interval_affine":
-            layer_cls = PhotonicBasisActivationLayerIntervalAffine
+        elif layer_type == "photonic_positive":
+            layer_cls = PhotonicBasisActivationLayerPositive
         elif layer_type == "photonic_interval_affine_clean":
             layer_cls = PhotonicBasisActivationLayerIntervalAffineClean
 
         else:
-            raise ValueError("layer_type must be 'standard', 'affine', or 'photonic'.")
+            raise ValueError("layer_type must be 'standard', 'affine', or 'photonic', or 'photonic_positive', or 'photonic_interval_affine_clean'.")
 
-        if layer_type in ["photonic", "photonic_interval_affine_clean"]:
+        if layer_type in ["photonic", "photonic_positive", "photonic_interval_affine_clean"]:
             if b_coef_selected is None:
                 raise ValueError(f"b_coef_selected must be provided when layer_type='{layer_type}'.")
 
@@ -735,6 +827,19 @@ class KAN(nn.Module):
                     debug=debug,
                 )
 
+            elif layer_type == "photonic_positive":
+                layer = layer_cls(
+                    in_count=layer_sizes[i],
+                    out_count=layer_sizes[i + 1],
+                    b_coef_selected=b_coef_selected,
+                    x_min=x_min,
+                    x_max=x_max,
+                    normalize_basis=normalize_basis,
+                    check_input_range=check_input_range,
+                    debug=debug,
+                    coeff_eps=coeff_eps,
+                )
+
             elif layer_type == "photonic_interval_affine_clean":
                 layer = layer_cls(
                     in_count=layer_sizes[i],
@@ -751,6 +856,26 @@ class KAN(nn.Module):
         self.layers = nn.ModuleList(layers)
         self.dropout = nn.Dropout(dropout_prob) if dropout_prob > 0 else None
     
+    def _get_layer_coeffs(self, layer):
+        """
+        Returns the effective coefficient tensor for any supported KAN layer.
+
+        For normal layers:
+            returns layer.coeffs
+
+        For positive-coefficient layers:
+            returns softplus(raw_coeffs) + eps
+        """
+        if hasattr(layer, "get_coeffs"):
+            return layer.get_coeffs()
+
+        if hasattr(layer, "coeffs"):
+            return layer.coeffs
+
+        raise AttributeError(
+            f"Layer type {type(layer).__name__} does not expose coeffs or get_coeffs()."
+        )
+
     def _validate_layer(self, layer_idx: int):
         layer = self.layers[layer_idx]
 
@@ -758,6 +883,7 @@ class KAN(nn.Module):
             TanhBasisActivationLayer,
             TanhBasisActivationLayerAffine,
             PhotonicBasisActivationLayer,
+            PhotonicBasisActivationLayerPositive,
             PhotonicBasisActivationLayerIntervalAffineClean,
         )
 
@@ -858,7 +984,7 @@ class KAN(nn.Module):
 
         x = torch.linspace(xmin, xmax, resolution)
 
-        coeffs = layer.coeffs[out_idx, in_idx]   # (M,)
+        coeffs = self._get_layer_coeffs(layer)[out_idx, in_idx]  # (M,)
         basis = self._compute_basis_on_grid(layer, in_idx, x)   # (R, M)
         contributions = basis * coeffs.unsqueeze(0)
         phi = contributions.sum(dim=1)
@@ -1051,6 +1177,9 @@ class KAN(nn.Module):
             for c in centers_np:
                 plt.axvline(c, linestyle="--", alpha=0.4)
 
+        elif isinstance(layer, PhotonicBasisActivationLayerPositive):
+            title_suffix = " (positive photonic bases)"
+
         elif isinstance(layer, PhotonicBasisActivationLayer):
             title_suffix = " (photonic bases)"
 
@@ -1065,50 +1194,6 @@ class KAN(nn.Module):
         if layer.num_basis <= 12:
             plt.legend()
 
-        plt.tight_layout()
-        plt.show()
-
-    def print_coeff_stats(self, layer_idx: int):
-        layer = self._validate_layer(layer_idx)
-
-        coeffs = layer.coeffs.detach()
-
-        print(f"Layer {layer_idx} coefficient tensor shape: {tuple(coeffs.shape)}")
-        print(f"  min  = {coeffs.min().item():.6f}")
-        print(f"  max  = {coeffs.max().item():.6f}")
-        print(f"  mean = {coeffs.mean().item():.6f}")
-        print(f"  std  = {coeffs.std().item():.6f}")
-
-        if isinstance(layer, TanhBasisActivationLayerAffine):
-            alpha = layer.get_alpha().detach()
-            beta = layer.get_beta().detach()
-            print(f"  alpha min/max = {alpha.min().item():.6f} / {alpha.max().item():.6f}")
-            print(f"  beta  min/max = {beta.min().item():.6f} / {beta.max().item():.6f}")
-
-        if isinstance(layer, PhotonicBasisActivationLayer):
-            print(f"  photonic b_coef shape = {tuple(layer.b_coef.shape)}")
-            print(f"  trainable photonic b_coef = False")
-
-    def plot_coefficients(
-        self,
-        layer_idx: int,
-        out_idx: int,
-        figsize=(8, 5),
-        cmap="coolwarm",
-    ):
-        layer = self._validate_layer(layer_idx)
-
-        if not (0 <= out_idx < layer.out_count):
-            raise ValueError(f"out_idx must be in [0, {layer.out_count - 1}]")
-
-        coeffs = layer.coeffs[out_idx].detach().cpu().numpy()
-
-        plt.figure(figsize=figsize)
-        plt.imshow(coeffs, aspect="auto", cmap=cmap)
-        plt.colorbar(label="Coefficient value")
-        plt.xlabel("Basis index m")
-        plt.ylabel("Input feature i")
-        plt.title(f"Layer {layer_idx}: coefficients for output neuron {out_idx}")
         plt.tight_layout()
         plt.show()
 
@@ -1127,7 +1212,8 @@ class KAN(nn.Module):
         if not (0 <= in_idx < layer.in_count):
             raise ValueError(f"in_idx must be in [0, {layer.in_count - 1}]")
 
-        coeffs = layer.coeffs[out_idx, in_idx].detach().cpu().numpy()
+        coeffs_tensor = self._get_layer_coeffs(layer)[out_idx, in_idx]
+        coeffs = coeffs_tensor.detach().cpu().numpy()
         
         export_plot_data_to_mat(
             mat_export_path,
@@ -1150,34 +1236,6 @@ class KAN(nn.Module):
             f"Layer {layer_idx}: coefficient vector for edge input {in_idx} -> output {out_idx}"
         )
         plt.grid(True)
-        plt.tight_layout()
-        plt.show()
-
-    def plot_all_coefficient_vectors(
-        self,
-        layer_idx: int,
-        out_idx: int,
-        max_inputs: int = None,
-    ):
-        layer = self._validate_layer(layer_idx)
-
-        if not (0 <= out_idx < layer.out_count):
-            raise ValueError(f"out_idx must be in [0, {layer.out_count - 1}]")
-
-        input_count = layer.in_count if max_inputs is None else min(layer.in_count, max_inputs)
-
-        plt.figure(figsize=(8, 5))
-
-        for in_idx in range(input_count):
-            coeffs = layer.coeffs[out_idx, in_idx].detach().cpu().numpy()
-            plt.plot(range(layer.num_basis), coeffs, marker="o", label=f"in {in_idx}")
-
-        plt.xlabel("Basis index m")
-        plt.ylabel("Coefficient value")
-        plt.title(f"Layer {layer_idx}: coefficient vectors for output neuron {out_idx}")
-        plt.grid(True)
-        if input_count <= 12:
-            plt.legend()
         plt.tight_layout()
         plt.show()
 
