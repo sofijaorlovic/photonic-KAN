@@ -761,6 +761,24 @@ class KAN(nn.Module):
         self.coeff_eps = coeff_eps
 
         layer_sizes = [in_count] + self.hidden_layer_sizes + [out_count]
+        num_layers = len(layer_sizes) - 1
+
+        if isinstance(input_abs_max, (list, tuple)):
+            if len(input_abs_max) != num_layers:
+                raise ValueError(
+                    f"If input_abs_max is a list/tuple, it must have one value per layer. "
+                    f"Expected {num_layers}, got {len(input_abs_max)}."
+                )
+
+            input_abs_max_by_layer = [float(v) for v in input_abs_max]
+
+            for v in input_abs_max_by_layer:
+                if v <= 0:
+                    raise ValueError("All input_abs_max values must be positive.")
+        else:
+            input_abs_max_by_layer = [float(input_abs_max)] * num_layers
+
+        self.input_abs_max_by_layer = input_abs_max_by_layer
 
         if layer_type == "standard":
             layer_cls = TanhBasisActivationLayer
@@ -792,6 +810,7 @@ class KAN(nn.Module):
             
         layers = []
         for i in range(len(layer_sizes) - 1):
+            layer_input_abs_max = input_abs_max_by_layer[i]
             if layer_type == "standard":
                 layer = layer_cls(
                     in_count=layer_sizes[i],
@@ -808,7 +827,7 @@ class KAN(nn.Module):
                     in_count=layer_sizes[i],
                     out_count=layer_sizes[i + 1],
                     num_basis=num_basis,
-                    input_abs_max=input_abs_max,
+                    input_abs_max=layer_input_abs_max,
                     x_min=x_min,
                     x_max=x_max,
                     gamma_scale=gamma_scale,
@@ -845,7 +864,7 @@ class KAN(nn.Module):
                     in_count=layer_sizes[i],
                     out_count=layer_sizes[i + 1],
                     b_coef_selected=b_coef_selected,
-                    input_abs_max=input_abs_max,
+                    input_abs_max=layer_input_abs_max,
                     basis_min=basis_min,
                     basis_max=basis_max,
                     debug=debug,
@@ -1047,7 +1066,7 @@ class KAN(nn.Module):
         plt.xlabel(f"Input feature x[{in_idx}]")
         plt.ylabel("Edge response")
         plt.title(f"Layer {layer_idx}: edge function from input {in_idx} to output {out_idx}")
-        #plt.legend()
+        plt.legend()
         plt.grid(True)
         plt.tight_layout()
         plt.show()
@@ -1423,3 +1442,35 @@ class KAN(nn.Module):
                         )
 
                 h = layer(h)
+
+
+    def print_photonic_affine_params(self):
+        """
+        Print alpha and beta values for all photonic interval affine layers.
+
+        In PhotonicBasisActivationLayerIntervalAffineClean:
+        - alpha has shape (in_count,)
+        - beta has shape (in_count,)
+        - alpha[in_idx], beta[in_idx] are shared across all outgoing edges
+            from input feature in_idx to every output unit.
+        """
+        print("Photonic interval affine parameters:")
+
+        for layer_idx, layer in enumerate(self.layers):
+            if isinstance(layer, PhotonicBasisActivationLayerIntervalAffineClean):
+                alpha_cpu = layer.alpha.detach().cpu()
+                beta_cpu = layer.beta.detach().cpu()
+
+                print(f"\nLayer {layer_idx}: {type(layer).__name__}")
+                print(f"  in_count = {layer.in_count}")
+                print(f"  out_count = {layer.out_count}")
+                print(f"  input_abs_max = {layer.input_abs_max}")
+                print(f"  basis interval = [{layer.basis_min}, {layer.basis_max}]")
+                print(f"  alpha shape = {tuple(alpha_cpu.shape)}")
+                print(f"  beta shape  = {tuple(beta_cpu.shape)}")
+                print(f"  alpha values = {alpha_cpu.numpy()}")
+                print(f"  beta values  = {beta_cpu.numpy()}")
+
+                if alpha_cpu.numel() > 0:
+                    print(f"  alpha unique = {torch.unique(alpha_cpu).numpy()}")
+                    print(f"  beta unique  = {torch.unique(beta_cpu).numpy()}")
