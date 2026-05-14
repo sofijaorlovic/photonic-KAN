@@ -594,7 +594,8 @@ class PhotonicBasisActivationLayerIntervalAffineClean(nn.Module):
         in_count: int,
         out_count: int,
         b_coef_selected: torch.Tensor,
-        input_abs_max: float,
+        input_neg_max: float,
+        input_pos_max: float,
         basis_min: float = 0.05,
         basis_max: float = 60.0,
         debug: bool = False,
@@ -612,9 +613,6 @@ class PhotonicBasisActivationLayerIntervalAffineClean(nn.Module):
                 f"b_coef_selected must have shape (num_basis, 8), got {tuple(b_coef_selected.shape)}"
             )
 
-        if input_abs_max <= 0:
-            raise ValueError("input_abs_max must be positive.")
-
         if basis_max <= basis_min:
             raise ValueError("basis_max must be greater than basis_min.")
 
@@ -622,15 +620,16 @@ class PhotonicBasisActivationLayerIntervalAffineClean(nn.Module):
         self.out_count = out_count
         self.num_basis = b_coef_selected.size(0)
 
-        self.input_abs_max = float(input_abs_max)
+        self.input_neg_max = float(input_neg_max)
+        self.input_pos_max = float(input_pos_max)
         self.basis_min = float(basis_min)
         self.basis_max = float(basis_max)
         self.debug = debug
 
         self.register_buffer("b_coef", b_coef_selected.clone().float())
 
-        alpha_value = (self.basis_max - self.basis_min) / (2.0 * self.input_abs_max)
-        beta_value = 0.5 * (self.basis_min + self.basis_max)
+        alpha_value = (self.basis_max - self.basis_min) / (self.input_pos_max + self.input_neg_max)
+        beta_value = self.basis_min + alpha_value * self.input_neg_max
 
         self.register_buffer(
             "alpha",
@@ -734,9 +733,9 @@ class KAN(nn.Module):
         check_input_range: bool = False, # only used if layer_type == "photonic"
         basis_min: float = 0.05,
         basis_max: float = 60.0,
-        input_abs_max: float = 10.0,    # only used for photonic layers with interval affine
-        input_min_by_layer=None,
-        input_max_by_layer=None,
+        input_abs_max: float = None,      # old symmetric option, optional backward compatibility
+        input_neg_max=None,               # new asymmetric negative-side range
+        input_pos_max=None,               # new asymmetric positive-side range
         coeff_eps: float = 1e-9,
     ):
         super().__init__()
@@ -755,30 +754,65 @@ class KAN(nn.Module):
         self.layer_type = layer_type
         self.basis_min = basis_min
         self.basis_max = basis_max
-        self.input_abs_max = input_abs_max
-        self.input_min_by_layer = input_min_by_layer
-        self.input_max_by_layer = input_max_by_layer
+        self.input_neg_max = input_neg_max
+        self.input_pos_max = input_pos_max
         self.coeff_eps = coeff_eps
 
         layer_sizes = [in_count] + self.hidden_layer_sizes + [out_count]
         num_layers = len(layer_sizes) - 1
 
-        if isinstance(input_abs_max, (list, tuple)):
-            if len(input_abs_max) != num_layers:
-                raise ValueError(
-                    f"If input_abs_max is a list/tuple, it must have one value per layer. "
-                    f"Expected {num_layers}, got {len(input_abs_max)}."
-                )
+        def _expand_layer_values(value, num_layers, name, default=None):
+            """
+            Expands scalar/list/tuple values to a list with one entry per layer.
+            Each entry can itself be a scalar or a per-input list/tensor.
+            """
+            if value is None:
+                if default is None:
+                    return None
+                value = default
 
-            input_abs_max_by_layer = [float(v) for v in input_abs_max]
+            if isinstance(value, (list, tuple)):
+                if len(value) == num_layers:
+                    return list(value)
+                else:
+                    # Treat as a single per-input vector shared across layers only if not layer-specific.
+                    # Usually for multi-layer networks, user should pass one value per layer.
+                    raise ValueError(
+                        f"{name} must have one entry per layer. Expected {num_layers}, got {len(value)}."
+                    )
 
-            for v in input_abs_max_by_layer:
-                if v <= 0:
-                    raise ValueError("All input_abs_max values must be positive.")
+            return [value] * num_layers
+
+
+        # New asymmetric input range handling.
+        # Backward compatibility:
+        # if input_neg_max/input_pos_max are not provided, use symmetric input_abs_max.
+        if input_neg_max is None and input_pos_max is None:
+            if input_abs_max is None:
+                input_abs_max = 10.0
+
+            input_neg_max_by_layer = _expand_layer_values(
+                input_abs_max, num_layers, "input_abs_max"
+            )
+            input_pos_max_by_layer = _expand_layer_values(
+                input_abs_max, num_layers, "input_abs_max"
+            )
+
+        elif input_neg_max is not None and input_pos_max is not None:
+            input_neg_max_by_layer = _expand_layer_values(
+                input_neg_max, num_layers, "input_neg_max"
+            )
+            input_pos_max_by_layer = _expand_layer_values(
+                input_pos_max, num_layers, "input_pos_max"
+            )
+
         else:
-            input_abs_max_by_layer = [float(input_abs_max)] * num_layers
+            raise ValueError(
+                "You must provide both input_neg_max and input_pos_max, or neither."
+            )
 
-        self.input_abs_max_by_layer = input_abs_max_by_layer
+        self.input_neg_max_by_layer = input_neg_max_by_layer
+        self.input_pos_max_by_layer = input_pos_max_by_layer
 
         if layer_type == "standard":
             layer_cls = TanhBasisActivationLayer
@@ -810,7 +844,8 @@ class KAN(nn.Module):
             
         layers = []
         for i in range(len(layer_sizes) - 1):
-            layer_input_abs_max = input_abs_max_by_layer[i]
+            layer_input_neg_max = input_neg_max_by_layer[i]
+            layer_input_pos_max = input_pos_max_by_layer[i]
             if layer_type == "standard":
                 layer = layer_cls(
                     in_count=layer_sizes[i],
@@ -827,7 +862,8 @@ class KAN(nn.Module):
                     in_count=layer_sizes[i],
                     out_count=layer_sizes[i + 1],
                     num_basis=num_basis,
-                    input_abs_max=layer_input_abs_max,
+                    input_neg_max=layer_input_neg_max,
+                    input_pos_max=layer_input_pos_max,
                     x_min=x_min,
                     x_max=x_max,
                     gamma_scale=gamma_scale,
@@ -864,7 +900,8 @@ class KAN(nn.Module):
                     in_count=layer_sizes[i],
                     out_count=layer_sizes[i + 1],
                     b_coef_selected=b_coef_selected,
-                    input_abs_max=layer_input_abs_max,
+                    input_neg_max=layer_input_neg_max,
+                    input_pos_max=layer_input_pos_max,
                     basis_min=basis_min,
                     basis_max=basis_max,
                     debug=debug,
@@ -1464,7 +1501,8 @@ class KAN(nn.Module):
                 print(f"\nLayer {layer_idx}: {type(layer).__name__}")
                 print(f"  in_count = {layer.in_count}")
                 print(f"  out_count = {layer.out_count}")
-                print(f"  input_abs_max = {layer.input_abs_max}")
+                print(f"  input_neg_max = {layer.input_neg_max}")
+                print(f"  input_pos_max = {layer.input_pos_max}")
                 print(f"  basis interval = [{layer.basis_min}, {layer.basis_max}]")
                 print(f"  alpha shape = {tuple(alpha_cpu.shape)}")
                 print(f"  beta shape  = {tuple(beta_cpu.shape)}")
