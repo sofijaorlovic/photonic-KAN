@@ -1,0 +1,100 @@
+Field-encoding (sqrt(m)) photonic KAN: description of the exported .mat files
+==============================================================================
+
+Edge model
+----------
+For an edge from input node p to output node q with m photonic bases:
+
+    u   = alpha_p * x_p + beta_p        affine map (alpha = 1, beta = 0 where no affine map is used)
+    P   = u^2 / m                       optical power entering each FP-LD (1:m splitter: u / sqrt(m))
+    b_k = b(P; b_coef_k)                analytic FP-LD activation, k = 1..m
+    s_k = sqrt(b_k)                     output field amplitude of basis k
+    phi_qp = sum_k a_qpk * s_k          edge function
+    z_q = sum_p phi_qp                  node value (input of the next layer)
+
+    b(P) = b1*log(1 + b2*log(1 + (exp(b3*P) - 1)^b4)) + b5*P + b6*P^2 + b7*P^3 + b8*P^4
+
+No clamping anywhere in the network: b(P) >= 0 for every basis on [0, 60] and b(0) = 0 exactly,
+so sqrt(b) is always defined. (The only clipping is in the IRIS data preparation, as in May.)
+
+The input / affine ranges are chosen so that P covers a fixed power window [P_min, P_max]
+(units of input_power in activation_KAN_fit_B_Sofija_extend_positive_basisKAN.mat):
+
+    experiment   m    power window P      input amplitude range
+    IRIS         3    [0, 1]              x in [0, sqrt(3)]       (min-max scaler fitted on the training set,
+                                                                 then clipped to the window, as in May)
+    [2-2]       10    [0, 1]              x in [0, sqrt(10)]      (target uses x / sqrt(10) in [0, 1])
+    [2-2-1]      8    [0.05, 8]           u = alpha*x + beta in [sqrt(8*0.05), sqrt(8*8)] = [0.632, 8]
+
+Because every edge has the same m, dividing by m is absorbed by this choice (divide_by_m = 0 gives
+identical results).
+
+Folders
+-------
+    kan_iris_positive_sqrtm_export/            IRIS          (notebook iris_experiment_sqrtm.ipynb)
+    2-2_sqrtm_exports/                         [2-2]         (notebook 2_input_2_output_sqrtm.ipynb)
+    new_consistent_affine_2-2-1_sqrtm_exports/ [2-2-1]       (notebook affine_kan_2-2-1_sqrtm.ipynb)
+
+The plot files have the same names and fields as the May exports (results_v1_IPC2026/), with these
+additional fields in basis_*.mat and edge_*.mat:
+
+    field_encoding   1 = new edge model, 0 = May model
+    divide_by_m      1 = P = u^2/m, 0 = P = u^2
+    num_basis_m      m
+    u                (R x 1)  amplitude after the affine map on the plotting grid x
+    P                (R x 1)  FP-LD input power on the grid
+    b_raw            (R x m)  raw activation b_k(P)
+    basis            (R x m)  sqrt(b_k(P)), i.e. the basis actually used in the edge (plotted vs x)
+
+Full forward pass file (one per experiment, test set)
+-----------------------------------------------------
+    photonic_kan_iris_sqrtm_full_forward_test.mat
+    photonic_kan_2-2_sqrtm_full_forward_test.mat
+    photonic_kan_2-2-1_sqrtm_full_forward_test.mat
+
+N = number of test samples, I / O = inputs / outputs of layer L, m = bases per edge.
+
+    layer{L}_input         (N x I)       node values entering layer L (layer0_input = test inputs)
+    layer{L}_alpha, _beta  (1 x I)       affine map
+    layer{L}_u             (N x I)       alpha .* input + beta
+    layer{L}_P             (N x I)       u.^2 / m
+    layer{L}_b             (N x I x m)   b_k(P)
+    layer{L}_basis         (N x I x m)   sqrt(b_k(P))
+    layer{L}_coeffs        (O x I x m)   expansion coefficients a (effective, i.e. after softplus for IRIS)
+    layer{L}_edge_values   (N x O x I)   phi(n,o,i) = sum_k coeffs(o,i,k) * basis(n,i,k)
+    layer{L}_output        (N x O)       sum over i of edge_values; = layer{L+1}_input
+    layer{L}_min_*/max_*                 min / max of each of the above
+    layer{L}_b_coef        (m x 8)       b1..b8 of the selected bases
+    layer{L}_num_basis_m, _field_encoding, _divide_by_m
+    layer{L}_input_range, _power_window, _amplitude_window     ([2-2-1] only)
+
+    y_pytorch                         model output from PyTorch
+    y_manual_numpy                    the same output recomputed step by step in NumPy
+    max_abs_error_pytorch_vs_numpy    max |y_pytorch - y_manual_numpy|
+    rel_error_pytorch_vs_numpy        the same, relative to max |y|
+
+plus experiment-specific fields: power_window, selected_indices_python / _matlab (python index + 1),
+selected_detunings, data, predictions, MSE / accuracy, seed, epochs, learning rate; for IRIS also the
+MinMaxScaler parameters, raw_coeffs and coeff_eps (a = softplus(raw_coeffs) + coeff_eps); for [2-2-1]
+the calibration_log (see below).
+
+MATLAB check of one edge (layer 0, output o, input i, sample n):
+    P   = layer0_P(n,i);
+    s   = sqrt(b(P; layer0_b_coef));                    % 1 x m
+    phi = sum(squeeze(layer0_coeffs(o,i,:))' .* s);   % = layer0_edge_values(n,o,i)
+
+[2-2-1] hidden-range calibration
+--------------------------------
+Only training data are used to set the layer-1 mapping.
+1. Probe run: 1000 epochs with a wide layer-1 range [-10, 10] (constant learning rate 1e-3); the min and
+   max hidden value z on the training inputs at the end of the probe are measured.
+2. Layer-1 range = [z_min, z_max] widened by 10 % around its centre; alpha, beta of layer 1 follow from it.
+3. Full training run (5000 epochs, learning rate decaying exponentially from 1e-3 to 1e-4;
+   loss_curves.mat: learning_rate).
+4. Check on the training inputs: u = alpha*z + beta >= 0 (no negative amplitude) and P = u^2/m <= 60
+   (fit range of the activation). Leaving the window [P_min, P_max] slightly is allowed. If the check
+   fails, layer 1 is re-mapped to the measured range (+10 %) and the model is retrained from the same
+   initialisation (max 10 runs). The same check on the test inputs is only reported.
+probe_hidden_range = [z_min, z_max] from step 1.
+calibration_log columns: [run, layer1_input_min, layer1_input_max, hidden_min, hidden_max,
+                          layer1_min_u, layer1_max_P, final_test_loss]   (hidden_min/max, min_u, max_P: training inputs)
