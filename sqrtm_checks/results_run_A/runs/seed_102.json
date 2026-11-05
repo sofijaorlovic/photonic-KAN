@@ -1,0 +1,37 @@
+{
+ "run": "seed_102",
+ "init_seed": 102,
+ "data_seed": 42,
+ "train_mse": 4.2385278629233206e-05,
+ "test_mse": 3.6964329786111445e-05,
+ "passes": 1,
+ "train_valid": true,
+ "test_valid": true,
+ "probe_z_min": -5.077612420832095,
+ "probe_z_max": 5.935742584413465,
+ "layer1_input_min": -5.6282801710943735,
+ "layer1_input_max": 6.486410334675743,
+ "layer1_alpha": 0.6081496233401282,
+ "layer1_beta": 4.055291998137432,
+ "hidden_min_train": -3.735777149767162,
+ "hidden_max_train": 3.6667860044748006,
+ "layer1_min_u_train": 1.7833805316238744,
+ "layer1_max_P_train": 4.938040485989283,
+ "layer1_min_u_test": 1.8167028239818377,
+ "layer1_max_P_test": 4.869037820705927,
+ "best_test_mse_during_training": 3.6964329786111445e-05,
+ "calibration_log": [
+  [
+   1.0,
+   -5.6282801710943735,
+   6.486410334675743,
+   -3.735777149767162,
+   3.6667860044748006,
+   1.7833805316238744,
+   4.938040485989283,
+   3.6964329786111445e-05
+  ]
+ ],
+ "torch_version": "2.15.0+cu132",
+ "seconds": 22.716474533081055
+}
