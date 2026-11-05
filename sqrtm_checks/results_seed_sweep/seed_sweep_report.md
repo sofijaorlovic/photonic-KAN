@@ -43,6 +43,18 @@ Selected indices per edge / layer: `seed_sweep_selected_indices.csv`.
   relative SD within that window: max R8 1.2e-02, E34 3.7e-02,
   G34 3.5e-02.
 
+## Deviations from the protocol
+
+| | Protocol | Seed sweep | Reason |
+|---|---|---|---|
+| Learning rate | constant 1e-3 (existing code) | 1e-3 -> 1e-4, exponential decay within each 5000-epoch phase, all variants | same training as the standard sqrt(m) model; smooth end of training |
+| R8 to 10000 epochs | the same training extended to 10000 epochs | 2 x 5000: the second phase continues from the phase-1 coefficients with a restarted learning-rate schedule | mirrors the two phases of E34 / G34; the R8 value after 5000 epochs is a normal 5000-epoch result |
+| lambda, G34 | 8e-4 (protocol table) | 3e-4 | lambda chosen on training data only: 800 / 200 split, trial seeds 1-3, rule fixed in advance (largest lambda within one standard error of the lowest validation MSE); the same procedure gave 8e-5 for E34, the table value |
+
+Within the protocol, but different from the earlier code: the mask threshold is the rule fixed in advance
+(largest gap of the sorted magnitudes, the same in every run) instead of a fixed 1e-3, and the G34 mask is one
+mask per layer (a basis is kept or removed on all edges of the layer), not per coefficient.
+
 ## Settings
 
 - sqrt(m) [2,2,1] KAN, power window [0.05, 8], layer-0 input range [-0.2, 1], shared layer-1 input range
